@@ -1,0 +1,14 @@
+# Python Stuff #
+################
+*.pyc
+*.pyo
+*~
+*.lock
+*.swp
+*.DS_Store
+
+# Logs and Databases #
+######################
+*.log
+*.out
+

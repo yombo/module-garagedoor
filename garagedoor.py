@@ -85,10 +85,10 @@ class GarageDoor(YomboModule):
         #setup garage door status to match input device status.
 
         for garageKey, garage in self.garageDevices.iteritems():
-            logger.info("11111: %s", garage)
             gdevice = garage['device']
             idevice = garage['inputDevice']
-            gdevice.setStatus(silent=True, status=idevice.status[0], statusExtended=idevice.statusExtended[0])
+            if gdevice.status[0].status != idevice.status[0].status or gdevice.status[0].statusextended != idevice.status[0].statusextended:
+                gdevice.setStatus(silent=True, status=idevice.status[0].status, statusExtended=idevice.status[0].statusextended)
     
     def stop(self):
         """
@@ -111,12 +111,12 @@ class GarageDoor(YomboModule):
         """
 
         if message.msgOrigUUID in self.requestsForwarded:
-            logger.info("in message:requestsForwarded")
+            logger.debug("in message:requestsForwarded: %s" % self.requestsForwarded[message.msgOrigUUID].dump())
 
-            deviceUUID = self.requestsForwarded[message.msgOrigUUID].payload['device'].deviceUUID
+#            logger.info(self.requestsForwarded[message.msgOrigUUID])
+            deviceUUID = self.requestsForwarded[message.msgOrigUUID].payload['deviceobj'].deviceUUID
             garageDevice = self.garageDevices[deviceUUID]['device']
 
-            logger.info("1111")
 
             if message.msgStatus == "processing":
                 if garageDevice.deviceUUID in self.pendingTimers:
@@ -134,19 +134,17 @@ class GarageDoor(YomboModule):
                 self.sendFailed(message.msgOrigUUID, garageDevice.deviceUUID, msgStatusExtra = message.msgStatusExtra) #original being request sent to device module
             return
 
-        logger.info("666")
-
         # if status, we only care about input devices we monitor.
         if message.msgType == 'status':
           logger.info("got message: %s", message.dump() )
           logger.info("my garage input devices: %s", self.garageInputDevices)
 
-          if 'device' in message.payload:
-            logger.info("message device devuceUUID: %s", message.payload['device'].deviceUUID)
+          if 'deviceobj' in message.payload:
+            logger.info("message device devuceUUID: %s", message.payload['deviceobj'].deviceUUID)
             
-            if message.payload['device'].deviceUUID in self.garageInputDevices:
-              garageDevice = self.garageDevices[self.garageInputDevices[message.payload['device'].deviceUUID]]['device']
-#              logger.info("668 garageDevice: %s", self.garageInputDevices[message.payload['device'].deviceUUID])
+            if message.payload['deviceobj'].deviceUUID in self.garageInputDevices:
+              garageDevice = self.garageDevices[self.garageInputDevices[message.payload['deviceobj'].deviceUUID]]['device']
+#              logger.info("668 garageDevice: %s", self.garageInputDevices[message.payload['deviceobj'].deviceUUID])
               garageDevice.setStatus(status=message.payload['status'], statusExtended=message.payload.get('statusExtended', None))
 #              logger.info("garageDevice status: %s", garageDevice.status)
 #              logger.info("setting garage door status for deviceuuid: %s (%s)", garageDevice.deviceUUID, message.payload['status'])
@@ -178,8 +176,8 @@ class GarageDoor(YomboModule):
 #        device = None
         deviceUUID = ''
         deviceTypeUUID = ''
-        if message.msgType == 'cmd' and message.msgStatus == 'new' and message.payload['command'].cmdUUID in self.garageCommands:
-            deviceUUID = message.payload['device'].deviceUUID
+        if message.msgType == 'cmd' and message.msgStatus == 'new' and message.payload['cmdobj'].cmdUUID in self.garageCommands:
+            deviceUUID = message.payload['deviceobj'].deviceUUID
             garageDevice = self.garageDevices[deviceUUID]['device']
             logger.info("qqq - garageDeviceUUID: %s", garageDevice.deviceUUID)
 
@@ -191,8 +189,8 @@ class GarageDoor(YomboModule):
 
 
             logger.info("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
-            logger.info("garage control: %s, garage status: %s", message.payload['command'].label.lower(), garageDevice.status[0].lower())
-            if message.payload['command'].label.lower() == garageDevice.status[0].lower():
+            logger.info("garage control: %s, garage status: %s", message.payload['cmdobj'].label.lower(), garageDevice.status[0].status.lower())
+            if message.payload['cmdobj'].label.lower() == garageDevice.status[0].status.lower():
                 logger.info("Garage is already in request state.")
                 reply = message.getReply(msgStatus="done", msgStatusExtra="No action was performed, garage is already in the requested state!" )
                 reply.send()
@@ -236,7 +234,7 @@ class GarageDoor(YomboModule):
 
     def sendFailed(self, msgUUID, garageUUID, **kwargs):
         origMsg = self.requestsForwarded[msgUUID]
-        deviceUUID = origMsg.payload['device'].deviceUUID
+        deviceUUID = origMsg.payload['deviceobj'].deviceUUID
 
         reply = origMsg.getReply(msgStatus=kwargs.get('msgStatus',"failed"), msgStatusExtra=kwargs.get('msgStatusExtra', "%s Command sent to garage door controller, however, garage never reported a status change." % garageUUID ) )
         reply.send()

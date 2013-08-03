@@ -54,6 +54,11 @@ class GarageDoor(YomboModule):
         self._ModDescription = "Manages garage doors."
         self._ModAuthor = "Mitch Schwenk @ Yombo"
         self._ModUrl = "http://www.yombo.net"
+        self._RegisterDistributions = ['status']
+#        self._RegisterVoiceCommands = [
+#          {'voiceCmd': "master garage door [close all, open all]", 'order' : 'nounverb'}
+#          ]
+        
 
         self.ourDeviceType = "JzHX3btaHD8FBLQFlav9solU"  # our virtual device type
         
@@ -62,8 +67,17 @@ class GarageDoor(YomboModule):
         
         self.garageInputDevices = {} # mapping of VGD to input sensors
 
-        self.requestsForwarded = {} # messages we generated to control a garage
-        self.pendingRequests = {} # 
+        # Map of pending message for a given garageDeviceUUID.
+        # key = garagedeviceuuid
+        # Contains the orig message and msgUUID for pending command
+        self.controlRequestsPending = {}
+
+        # Map of pending message for a given garageDeviceUUID.
+        # key = comand sent msg uuid
+        # Contains the orig message and garagedeviceuuid for reference
+        self.requestsMessagesOrig = {}
+            
+        # used to store timers for pending/failed messages
         self.pendingTimers = {}
 
         self.garageCommands = ('EZbM3Z01vTsV72JoGMDiBHej', 'EZbCa3HcxQwGN1wXbYXcp7pv')
@@ -73,7 +87,6 @@ class GarageDoor(YomboModule):
         """
         First, get a list of all devices we manage. validate that the commands
         we were given are valid for that device. 
-        Gets device information. Gets ready to handle commands.
         """
         for item in self._DevicesByType(self.ourDeviceType):
             if item.validateCommand(item.deviceVariables['controlPulseStart'][0]) == False:
@@ -103,9 +116,14 @@ class GarageDoor(YomboModule):
 
     def start(self):
         """
-        Nothing to do... Yet...?
+        Sync the status of our virtual garage door (VGD) device to the input
+        status device.  These should always match.
         """
-        pass
+        for garage in self.garageDevices:
+            if self.garageDevices[garage]['device'].status[0].status != self.garageDevices[garage]['inputDevice'].status[0].status:
+                status = self.garageDevices[garage]['inputDevice'].status[0].status
+                statusextra = self.garageDevices[garage]['inputDevice'].status[0].statusextra
+                self.garageDevices[garage]['device'].setStatus(status = status, statusExtra = statusextra, source=self._FullName)
     
     def stop(self):
         """
@@ -140,33 +158,70 @@ class GarageDoor(YomboModule):
         # Perhaps a status update from our input sensor. Check, and update
         # out garage door virutal device. Also, if any pending requests are
         # around, let them know.
-        logger.info("Garage got msg: %s" % message.dump())
-        if message.msgType == 'status' and message['payload']['deviceUUID'] in self.garageInputDevices:
+        #logger.info("Garage got msg: %s" % message.dump())
+        if message.msgType == 'status' and message['payload']['deviceobj'].deviceUUID in self.garageInputDevices:
             # Get our VGD, and then set it's status.
-            garageDevice = self.garageDevices[message['payload']['deviceUUID']]['device']
-            garageDevice.setStatus(status=message.payload['status'], statusExtended=message.payload.get('statusExtra', ''))
-            if message['payload']['deviceUUID'] in self.pendingRequests:
-                origMsg = self.requestsForwarded[message['payload']['deviceUUID']]
-                replyMsg = origMsg.getReply(msgStatus="done", msgStatusExtra=message.payload['status'])
-                replyMsg.send()
-            return
+            garageDeviceUUID = self.garageInputDevices[message['payload']['deviceobj'].deviceUUID]
+            garageDevice = self.garageDevices[garageDeviceUUID]['device']
+            garageDevice.setStatus(status=message.payload['status'].status, statusExtra=message.payload['status'].statusextra, source=self._FullName)
 
-        #We only care about message to us if it's not a status update.
+            # Now see if we have pending items for this garageDevice. If we do,
+            # send a response. We'll also need to delete requests forwarded
+            # and stop/delete any pending timers.
+            if garageDeviceUUID in self.controlRequestsPending:
+                origMsg = self.controlRequestsPending[garageDeviceUUID]['message']
+
+#                textStatus = ''
+                if message.payload['status'].status == 'open': #opening...
+                    textStatus = "%s is now open." % garageDevice.label
+                else:
+                    textStatus = "%s is now closed." % garageDevice.label
+                    
+                replyMsg = origMsg.getReply(msgStatus="done", msgStatusExtra=message.payload['status'], textStatus = textStatus)
+                replyMsg.send()
+
+                # now delete pending/failed timer, and cleanup pending dictionaries
+                self.deleteTimer(self.controlRequestsPending[garageDevice.deviceUUID]['messageOrig'])
+                if self.controlRequestsPending[garageDevice.deviceUUID]['messageOrig'] in self.requestsMessagesOrig:
+                    del self.requestsMessagesOrig[self.controlRequestsPending[garageDevice.deviceUUID]['messageOrig']]
+                del self.controlRequestsPending[garageDevice.deviceUUID]
+            return
+        
+
+        #From here on, we only care about message to us if it's not a status update.
         if message.msgDestination != self._FullName.lower():
-            logger.warning("Discarding rogue message!!!")
+            logger.debug("Discarding rogue message - don't worry.")
             return  
 
+        # toss out messages that have a bad command for us.
+        if 'cmdobj' in message.payload and message.payload['cmdobj'].cmdUUID not in self.garageCommands:
+            logger.warning("Discarding garage message, we don't know what that command does.")
+            return  
 
-        if message.msgOrigUUID in self.requestsForwarded:
-            origMsg = self.requestsForwarded[message.msgOrigUUID]
+        # toss out messages that have a bad command for us.
+        if 'cmdobj' in message.payload and message.payload['deviceobj'].deviceUUID not in self.garageDevices:
+            logger.warning("Unable to control a garage door not assigned to this module. Sorry.")
+            return  
+
+        # lets process cmd returns.  Treat returns as only status updates.
+        # Don't send that it's really done until input senor tells us!
+        if message.msgType == 'cmd' and message.msgStatus != 'new':
+          if message.msgOrigUUID in self.requestsMessagesOrig:
+            origMsg = self.requestsMessagesOrig[message.msgOrigUUID]['message']
             if (message.msgStatus == 'done' or message.msgStatus == 'processing'):
                 theArgs = {'msgStatus' : 'processing'}
                 if (origMsg.payload['cmdUUID'] == 'EZbM3Z01vTsV72JoGMDiBHej'): #opening...
                   theArgs['msgStatusExtra'] = "opening garage"
+                  theArgs['textStatus'] = "Processing request to open garage."
                 elif (origMsg.payload['cmdUUID'] == 'EZbCa3HcxQwGN1wXbYXcp7pv'): #closing...
-                  theArgs['msgStatusExtra'] = "opening garage"
+                  theArgs['msgStatusExtra'] = "closing garage"
+                  theArgs['textStatus'] = "Processing request to close garage."
 
+                # we only send that it's in progress because we wait to input
+                # sensor to tell us the truth.
                 self.sendProcessing(message.msgOrigUUID, **theArgs) #original being request sent to device module
+
+            # Something has happened.  Lets give up and tell the user.
             else:
                 if message.msgOrigUUID in self.pendingTimers and callable(self.pendingTimers[message.msgOrigUUID].cancel):
                     if self.pendingTimers[message.msgOrigUUID].active():
@@ -175,82 +230,104 @@ class GarageDoor(YomboModule):
                 reply = origMsg.getReply(**message.dump())
                 reply.send()
 
-                del self.requestsForwarded[message.msgOrigUUID]
-                del self.pendingRequests
-                return
+                # don't forget to cleanup messages and timers that are pending
+                self.deleteTimer(message.msgOrigUUID)
+                if self.requestsMessagesOrig[message.msgOrigUUID]['garageDeviceUUID'] in self.controlRequestsPending:
+                    del self.controlRequestsPending[ self.requestsMessagesOrig[message.msgOrigUUID]['garageDeviceUUID'] ]
+                del self.requestsMessagesOrig[message.msgOrigUUID]
+            return
 
-#        device = None
-        deviceUUID = ''
-        deviceTypeUUID = ''
-        if message.msgType == 'cmd' and message.msgStatus == 'new' and message['payload']['cmdUUID'] in self.garageCommands:
-            deviceUUID = message['payload']['deviceUUID']
-            garageDevice = self.garageDevices[deviceUUID]['device']
-
-            logger.info(self.pendingRequests)
-            if garageDevice.deviceUUID in self.pendingRequests:
+        # We FINALLY get to process new commands! YAY!
+        if message.msgType == 'cmd' and message.msgStatus == 'new':
+            
+            garageDeviceUUID = message['payload']['deviceobj'].deviceUUID
+            garageDevice = self.garageDevices[garageDeviceUUID]['device']
+            
+            # If garage change is already pending, say sorry, can't now.
+            if garageDevice.deviceUUID in self.controlRequestsPending:
                 reply = message.getReply(msgStatus="failed", msgStatusExtra="A request for this device is currently pending. Try again later." )
                 reply.send
                 return
 
-            self.pendingRequests[garageDevice.deviceUUID] = message
-
-            if message['payload']['cmd'] == garageDevice.status:
-                replyMsg = message.getReply(msgStatus="done")
+            # If garage already in requested position, let them know i'm lazy.
+            if message['payload']['cmd'] == garageDevice.status[0].status:
+                action = 'closed'
+                label = garageDevice.label
+                if garageDevice.status[0].status == 'open':
+                  action = 'open'
+                output = "%s already %s, nothing to do." % (garageDevice.label, action)
+                replyMsg = message.getReply(msgStatus="done",
+                  msgStatusExtra=output,
+                  textStatus=output)
                 replyMsg.send()
                 return
 
+            # If we made it this  far, the garage needs to be moved.
+            # First, start the relay with pulseStart command, then stop
+            # with pulseStop
+            controlDevice = self.garageDevices[garageDeviceUUID]['controlDevice']
+            ctlmsg = controlDevice.getMessage(self, cmdUUID=self.garageDevices[garageDeviceUUID]['controlPulseStart'])
 
-            inputDevice = self.garageDevices[deviceUUID]['inputDevice']
-            
-            # if garage needs to be moved:
-            controlDevice = self.garageDevices[deviceUUID]['controlDevice']
-            ctlmsg = controlDevice.getMessage(self, cmdUUID=self.garageDevices[deviceUUID]['controlPulseStart'])
+            # Undo the relay action. 
+            ctlmsg2 = controlDevice.getMessage(self, cmdUUID=self.garageDevices[garageDeviceUUID]['controlPulseEnd'])
 
-            # after delay, stop the control pulse
-            ctlmsg2 = controlDevice.getMessage(self, cmdUUID=self.garageDevices[deviceUUID]['controlPulseEnd'])
+            self.controlRequestsPending[garageDevice.deviceUUID] = {
+                'message' : message,
+                'messageOrig' : ctlmsg2.msgUUID,
+            }
+            self.requestsMessagesOrig[ctlmsg2.msgUUID] = {
+                'message' : message,
+                'garageDeviceUUID' : garageDevice.deviceUUID,
+            }
 
-            self.requestsForwarded[ctlmsg2.msgUUID] = message
-
+            # now we send the actual commands now that everything is setup.
             ctlmsg.send()
 
             #time entered is in milliseconds. Convert an int to milliseconds.
-            callLater(self.garageDevices[deviceUUID]['controlPulseTime']*.001, ctlmsg2.send)
+            callLater(self.garageDevices[garageDeviceUUID]['controlPulseTime']*.001, ctlmsg2.send)
 
-            self.pendingTimers[ctlmsg2.msgUUID] = callLater(1.1, self.sendProcessing, ctlmsg2.msgUUID)
+            # This sends a "processing" message incase we don't get something
+            # back soon. This is typical as garages take a while to close.
+            self.pendingTimers[ctlmsg2.msgUUID] = callLater(0.99, self.sendProcessing, ctlmsg2.msgUUID)
 
             # catchall to cleanup anything left over...
-            callLater(1200, self.cleanUpRequestsForwarded, ctlmsg2.msgUUID)
-            callLater(1200, self.cleanUpPendingRequets, garageDevice.deviceUUID)
+            callLater(1200, self.cleanUpcontrolRequestsPending, garageDevice.deviceUUID)
+            callLater(1200, self.cleanUprequestsMessagesOrig, ctlmsg2.msgUUID)
             
     def sendProcessing(self, msgUUID, **kwargs):
-        logger.info("in sendProcessing for msgUUID: %s", msgUUID)
-        origMsg = self.requestsForwarded[msgUUID]
+        origMsg = self.requestsMessagesOrig[msgUUID]['message']
         reply = origMsg.getReply(msgStatus=kwargs.get('msgStatus',"processing"), msgStatusExtra=kwargs.get('msgStatusExtra', "Command sent to garage door controller, pending results.") )
         reply.send()
 
-        if msgUUID in self.pendingTimers and callable(self.pendingTimers[msgUUID].cancel):
-            if self.pendingTimers[msgUUID].active():
-                self.pendingTimers[msgUUID].cancel()
-                del self.pendingTimers[msgUUID]
-
+        self.deleteTimer(msgUUID)
+        
         self.pendingTimers[msgUUID] = callLater(60, self.sendFailed, msgUUID)
 
     def sendFailed(self, msgUUID, **kwargs):
-        origMsg = self.requestsForwarded[msgUUID]
-        deviceUUID = origMsg['payload']['deviceUUID']
+        origMsg = self.requestsMessagesOrig[msgUUID]['message']
+        logger.info("send failed?? %s" % origMsg.dump())
+        deviceUUID = origMsg['payload']['deviceobj'].deviceUUID
 
-        del self.pendingRequests[deviceUUID]
-        del self.requestsForwarded[msgUUID]
-        del self.pendingTimers[msgUUID]
+        if self.requestsMessagesOrig[msgUUID]['garageDeviceUUID'] in self.controlRequestsPending:
+            del self.controlRequestsPending[self.requestsMessagesOrig[msgUUID]['garageDeviceUUID']]
+        del self.requestsMessagesOrig[msgUUID]
+        
+        self.deleteTimer(msgUUID)
 
         reply = origMsg.getReply(msgStatus=kwargs.get('msgStatus',"failed"), msgStatusExtra=kwargs.get('msgStatusExtra', "Command sent to garage door controller, however, garage never reported a status change.") )
         reply.send()
+        
+    def deleteTimer(self, timerid):
+        if timerid in self.pendingTimers and callable(self.pendingTimers[timerid].cancel):
+            if self.pendingTimers[timerid].active():
+                self.pendingTimers[timerid].cancel()
+                del self.pendingTimers[timerid]
+                
+    def cleanUpcontrolRequestsPending(self, itemID):
+        if itemID in self.controlRequestsPending:
+          del self.controlRequestsPending[itemID]
 
-    def cleanUpRequestsForwarded(self, itemID):
-        if itemID in self.requestsForwarded:
-          del self.requestsForwarded[itemID]
-
-    def cleanUpPendingRequets(self, itemID):
-        if itemID in self.pendingRequests:
-          del self.pendingRequests[itemID]
+    def cleanUprequestsMessagesOrig(self, itemID):
+        if itemID in self.requestsMessagesOrig:
+          del self.requestsMessagesOrig[itemID]
 	

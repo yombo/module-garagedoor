@@ -1,28 +1,44 @@
+Usage
+=====
+
+This module extends the capabilities of the `Yombo Gateway <https://yombo.net/>`_
+by adding logic to control garage door (or devices that act like garage doors).
+
 Garage Door
 ================
 
-Manage garage doors. Assumes that garage doors are controlled using
-a temporary "short" or "pulse" of a relay.
+**Warning: **  Caution should be used when operating garage doors remotely. Video cameras
+or other sensors should be used to validate the safety of operation.
 
-Implements an interface between Jabber and YomboBot module. Allows interactions between the YomboBot module through a Jabber chat session.
+To act like a garage door, 2 devices are required:
 
-**Warning: **  Caution should be used when operating garage doors
-remotely and ensure no one is around the garage door when being
-activated.
+# An input sensor to determine if the garage door is 'closed' (or low, 0, off).
+# A control device connected to a relay or some output controller.
+
+Optional: An "all clear" device can be used to note if it's safe to operate the
+garage door. This device can be any real or virtual device or state. If the device
+or state has one of the following values, this module will accept and process commands:
+on, 1, high, ok
+
+This module uses the 'control' device and pulses the relay to simulate someone pushing
+a garage door opener button.
 
 Installation
 ============
 
 Simply mark this module as being used by the gateway, and the gateway will
-download this module and install this module automatically.
+download and install this module automatically.
 
 Requirements
 ============
 
-None.
+See "Garage Door" above for requirements.
 
 License
 =======
 
-RPL-1.5  See LICENSE file for full details.
+The `Yombo <https://yombo.net/>`_ team and other contributors
+hopes that it will be useful, but WITHOUT ANY WARRANTY; without even the
+implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
+See LICENSE file for full details.

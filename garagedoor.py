@@ -1,39 +1,47 @@
 """
-This module can control a garage door. It uses a virtual device that users
-setup when instaling this module. It acts as a point to control, but is not
-a real device.
+This module can control a garage door, gate, or any device that requires a
+momentary relay close or open. It requires at least one input sensor at the closed
+position to note when the garage door, gate, etc is closed. Optionally, another
+input sensor can be used to ensure the device is in the proper input position.
 
-This module uses two real devices. One device is for getting the status of the
-garage and is known as the the "input" device. This is typically a sensor such
-as a magnetic reed switch or some other switch connected to an input device.
+Three additional input sensors can be used:
 
-The second device is used to control the garage motor. This module expects to
-momentarily activate the relay. This mimics what would happen if the user
-pressed a button to open/close a garage. This is known as the "control" device.
+# Motion detector: The motion detector should close (makes the input go high) the
+  circuit when motion is detected. This will reset the automatic close timer. For
+  gates, this could be a car occupancy sensor underground.
+# Autoclose disable: A switch that closes a circuit (makes the input go high) when
+  the user wishes to temporarily disable the automatic closure of the device. This
+  can be an occupany sensor and/or switch (wired in series) which would disable the
+  automation close function.
+# Autoclose alarm: A device that can act as an auto close alarm to alert anyone near
+  the garage door or gate.
+# Disable control: A switch that closes a circuit (makes the input go high) when
+  the user wishes to disable this module from controlling this garage door.
 
-The virtual garage device (VGD) status mirrors the input device status. If 
-the input device is closed, then the VGD status is closed. 
+This module enabled a new device type "Garage Door" and is considered a virtual
+device. It uses another device to pulse a relay which acts like someone pressed
+the garage door button manually.
+
+The virtual garage device (VGD) status mirrors the closed input device status. If 
+the input device is closed, then the VGD status is closed.
 
 When the user sends and open or close command to the VGD, it first checks to
 see if the garage is in the desired position already. If it is, it will respond
-with "done".  If not, it will send two commands to the control device. First,
+with "done". If not, it will send two commands to the control device. First,
 it will send a close and then an open.
 
-This module has to track lots of messages flying around. It has to track
-messages it receives so it knows who to respond to when it's all done. It also
-generates messages (commands) to the control device, and needs to track
-those messages to.  It uses this tracking system to monitor the progress
-of the garage door. If the garage door doesn't respond, it will reply to the
-original sender of an error.  If the control device reports an error, it will
-forward that error message on.
+This module is considered complex because it has to track if a command to is
+is already pending, as well as checking various input devices for decision logic.
 
-:copyright: 2012-2016 Yombo
-:license: RPL 1.5
+:copyright: 2012-2017 Yombo
+:license: YRPL 1.6
 """
 from twisted.internet import reactor
+from twisted.internet.defer import inlineCallbacks, returnValue
 
 from yombo.core.log import get_logger
 from yombo.core.module import YomboModule
+from yombo.utils.maxdict import MaxDict
 
 logger = get_logger('modules.garagedoor')
 
@@ -46,81 +54,191 @@ class GarageDoor(YomboModule):
     :cvar garageControl: The device id to pulse to control a garage door.
     :cvar deviceType: The device_type_id that is a garage door device.
     """
-
     def _init_(self):
         """
         Define some basic start up items.
         """
-        self._ModDescription = "Manages garage doors."
-        self._ModAuthor = "Mitch Schwenk @ Yombo"
-        self._ModUrl = "http://yombo.net"
 #        self._RegisterVoiceCommands = [
 #          {'voice_cmd': "master garage door [close all, open all]", 'order' : 'nounverb'}
 #          ]
-        
+
+        self.received_commands = MaxDict(300) # stores incoming commands for status update when done.
+
         self.garageDevices = {} # mapping of Virtual Garage Doors to real garage controllers.
         # garageDevices[VGD] = { real device and control information }
         
-        self.garageInputDevices = {} # mapping of Virtual Garage Doors to input sensors
+        self.garageClosedDevices = {} # mapping of Virtual Garage Doors to input sensors
+        self.garageOpenDevices = {} # mapping of Virtual Garage Doors to input sensors
 
         # Map of pending message for a given garageDeviceUUID.
         # key = garagedeviceuuid
         # Contains the orig message and msgUUID for pending command
-        self.controlRequestsPending = {}
-
-        # Map of pending message for a given garageDeviceUUID.
-        # key = comand sent msg uuid
-        # Contains the orig message and garagedeviceuuid for reference
-        self.requestsMessagesOrig = {}
+        self.control_requests_pending = MaxDict(300)
 
         # used to store timers for pending/failed messages
-        self.pendingTimers = {}
+        self.pendingTimers = MaxDict(300)
 
-        self.garageCommands = (self._Commands['open'].cmdUUID, self._Commands['close'].cmdUUID)
+        self.garageCommands = (self._Commands['open'].command_id, self._Commands['close'].command_id)
 
+    @inlineCallbacks
     def _load_(self):
+        yield self._reload_()
+
+    @inlineCallbacks
+    def _reload_(self):
         """
         First, get a list of all devices we manage. validate that the commands
         we were given are valid for that device.
         """
-        # item - is a device
-        for item in self._Devices:
-            if item.validate_command(item.deviceVariables['controlPulseStart'][0]['value']) == False:
-                logger.warn("Invalid control pulse start command.")
+        my_devices = self._devices()
+        for device in my_devices:
+            device_variables = yield device.device_variables()
+            if device.validate_command(device_variables['controlpulsestart']['values'][0]) == False:
+                logger.warn("Unable to control garage door '{device}, pulse start command is mising: {controlpulsestart}",
+                            device=device.label,
+                            controlpulsestart=device_variables['controlpulsestart']['values'][0] )
                 continue
-            if item.validate_command(item.deviceVariables['controlPulseEnd'][0]['value']) == False:
-                logger.warn("Invalid control pulse end command.")
+            if device.validate_command(device_variables['controlpulseend']['values'][0]) == False:
+                logger.warn("Unable to control garage door '{device}, pulse end command is mising: {controlpulseend}",
+                            device=device.label,
+                            controlpulseend=device_variables['controlpulseend']['values'][0] )
                 continue
             try:
-                controlPulseTime = int(item.deviceVariables['controlPulseTime'][0]['value'])
+                controlPulseTime = float(device_variables['controlpulsetime']['values'][0])
             except:
                 logger.warn("Invalid control pulse time (length) is not a number.")
                 continue
 
-            self.garageDevices[item.device_id] = {
-                'device' : item,
-                'inputDevice' : self._Devices[item.deviceVariables['inputDevice'][0]['value']],
-                'inputStateClosed' : item.deviceVariables['inputStateClosed'][0]['value'],
-                'inputStateOpen' : item.deviceVariables['inputStateOpen'][0]['value'],
-                'controlDevice' : self._Devices[item.deviceVariables['controlDevice'][0]['value']],
-                'controlPulseTime' : controlPulseTime,
-                'controlPulseStart' : item.deviceVariables['controlPulseStart'][0]['value'],
-                'controlPulseEnd' : item.deviceVariables['controlPulseEnd'][0]['value'],
-                }
+            if controlPulseTime <= 0:
+                logger.warn("Unable to control garage door '{device}, pulse time too short: {controlPulseTime}",
+                            device=device.label,
+                            controlPulseTime=controlPulseTime)
+                continue
 
-            logger.debug("garage device: %s" % self.garageDevices)
-            self.garageInputDevices[item.deviceVariables['inputDevice'][0]['value']] = item.device_id
+            try:
+                autoCloseTime = float(device_variables['autoclosetime']['values'][0])
+            except:
+                logger.warn("Invalid auto close time (length) is not a number.")
+                continue
+
+            try:
+                closed_device = self._Devices[device_variables['closeddevice']['values'][0]]
+            except:
+                logger.warn("Unable to control garage door '{device}, closed device missing: {closeddevice}",
+                            device=device.label,
+                            closeddevice=device_variables['closeddevice']['values'][0] )
+                continue
+
+            garage_data = {
+                'device' : device,
+                'closedDevice' : closed_device,
+                'closedStateClosed': device_variables['closedstateclosed']['values'][0],
+                'closedStateOpened': device_variables['closedstateopened']['values'][0],
+                'controlDevice': device_variables['controldevice']['values'][0],
+                'controlPulseTime': controlPulseTime,
+                'controlPulseStart': device_variables['controlpulsestart']['values'][0],
+                'controlPulseEnd': device_variables['controlpulseend']['values'][0],
+                'autoCloseTime': autoCloseTime,
+            }
+
+            try:
+                garage_data['openDevice'] = self._Devices[device_variables['opendevice']['values'][0]]
+                garage_data['openStateOpened'] = device_variables['openstateopened']['values'][0]
+                self.garageOpenedDevices[garage_data['opendevice'].device_id] = device.device_id
+            except:
+                logger.warn("No open device found. Will assume garage door ({device}) is open if it's not closed.",
+                            device=device.label)
+                garage_data['openDevice'] = None
+
+            try:
+                garage_data['autoCloseDisableDevice'] = self._Devices[device_variables['autoCloseDisableDevice']['values'][0]]
+                garage_data['autoCloseDisableDeviceEnabledState'] = self._Devices[device_variables['autoCloseDisableDeviceEnabledState']['values'][0]]
+                garage_data['autoCloseDisableDeviceDisabledState'] = self._Devices[device_variables['autoCloseDisableDeviceDisabledState']['values'][0]]
+            except:
+                logger.error("No auto close disable device found or it's states are invalid. No auto close override will be available.",
+                            device=device.label)
+                garage_data['autoCloseDisableDevice'] = None
+
+            try:
+                garage_data['autoCloseAlertDevice'] = self._Devices[device_variables['autoCloseAlertDevice']['values'][0]]
+                garage_data['autoCloseAlertStartCommand'] = self._Devices[device_variables['autoCloseAlertStartCommand']['values'][0]]
+                garage_data['autoCloseAlertEndCommand'] = self._Devices[device_variables['autoCloseAlertEndCommand']['values'][0]]
+            except:
+                logger.error("No auto close alert device found, or alert times are invalid. No auto close alert will be available.",
+                            device=device.label)
+                garage_data['autoCloseAlertDevice'] = None
+
+            if garage_data['autoCloseAlertDevice'] is not None:
+                try:
+                    garage_data['autoCloseAlertBeforeTime'] = int(self._Devices[device_variables['autoCloseAlertBeforeTime']['values'][0]])
+                except:
+                    logger.warn("Auto close alert before time is invalid. Setting to 30 seconds.",
+                                device=device.label)
+                    garage_data['autoCloseAlertBeforeTime'] = 30
+
+                try:
+                    garage_data['autoCloseAlertAfterTime'] = int(self._Devices[device_variables['autoCloseAlertAfterTime']['values'][0]])
+                except:
+                    logger.warn("Auto close alert after time is invalid. Setting to 10 seconds.",
+                                device=device.label)
+                    garage_data['autoCloseAlertAfterTime'] = 10
+
+            self.garageDevices[device.device_id] = garage_data
+            self.garageClosedDevices[closed_device.device_id] = device.device_id
+
+            logger.debug("garage_data: %s" % garage_data)
 
     def _start_(self):
         """
         Sync the status of our virtual garage door (VGD) device to the input
-        status device.  These should always match.
+        status device. These should always match.
         """
-        for garage in self.garageDevices:
-            if self.garageDevices[garage]['device'].status[0].status != self.garageDevices[garage]['inputDevice'].status[0].status:
-                status = self.garageDevices[garage]['inputDevice'].status[0].status
-                statusextra = self.garageDevices[garage]['inputDevice'].status[0].statusextra
-                self.garageDevices[garage]['device'].set_status(status = status, statusExtra = statusextra, source=self._FullName)
+        for garage_id, garage in self.garageDevices.iteritems():
+            self.set_garage_door_status(garage_id)
+
+    def set_garage_door_status(self, device_id):
+
+        def local_set_status(device, **kwargs):
+            device.set_status(**kwargs)
+
+        garage = self.garageDevices[device_id]
+        garage_device = garage['device']
+        garage_state = garage['device'].status_history[0]['machine_status']
+        machine_status = None
+        machine_status_extra = None
+
+        if garage['openDevice'] is not None:  #we have a sensor for open and closed. Device is neither of these, machine status = .5
+            closed_device =  garage['closedDevice']
+            open_device =  garage['openDevice']
+            closed_state =  garage['closedStateClosed']
+            open_state =  garage['openStateOpened']
+        else:
+            closed_device =  garage['closedDevice']
+            open_device =  garage['closedDevice']
+            closed_state =  garage['closedStateClosed']
+            open_state =  garage['closedStateOpened']
+
+        if closed_device.status_history[0]['machine_status'] == closed_state:
+            if garage_state != closed_state:
+                local_set_status(garage_state['device'],
+                                 machine_status=closed_device.status_history[0]['machine_status'],
+                                 machine_status_extra=closed_device.status_history[0]['machine_status_extra'],
+                                 source=self._FullName)
+                return closed_state
+
+        if open_device.status_history[0]['machine_status'] == open_state:
+            if garage_state != open_state:
+                local_set_status(garage_state['device'],
+                                 machine_status=open_device.status_history[0]['machine_status'],
+                                 machine_status_extra=open_device.status_history[0]['machine_status_extra'],
+                                 source=self._FullName)
+                return open_state
+
+        local_set_status(garage_state['device'],
+                         machine_status=.5,
+                         source=self._FullName)
+
+        return machine_status
 
     def _stop_(self):
         """
@@ -135,6 +253,76 @@ class GarageDoor(YomboModule):
         or reload all the modules.  Should assume gateway is going down.
         """
         pass
+
+    def _set_status(self, device, command):
+        if command.machine_label == "open":
+            machine_status = 1
+        else:
+            machine_status = 0
+        device.set_status(human_status=command.label,
+                          human_message="The garage is: %s" % command.label,
+                          machine_status=machine_status,
+                          command=command)
+
+    def _device_command_(self, **kwargs):
+        """
+        Implements the system hook to process garage door commands.
+        """
+        device = kwargs['device']
+
+        if device.device_id not in self.garageDevices:
+            logger.debug("Garage door module cannot handle device_type_id: {device_type_id}", device_type_id=device.device_type_id)
+            return None
+
+        print "garagedoor...device_command: %s" % device.label
+
+        request_id = kwargs['request_id']
+
+        command = kwargs['command']
+        self.received_commands[request_id] = {
+            'request_id': request_id,
+            'callback': self.device_command_done,
+            'device': device,
+            'command': command,
+        }
+
+        if device.device_id in self.control_requests_pending:
+            # If garage change is already pending, say sorry, can't now.
+            logger.info("Garage door already has a pending request: {request}", request=self.control_requests_pending[request_id])
+            device.device_command_failed(request_id, message="Pending already in progress.")
+            return None
+
+        # If garage already in requested position, let them know i'm lazy.
+        garage_info = self.garageDevices[device.device_id]
+        if garage_info['closedDevice'].status_history[0].machine_label != command.machine_label:
+            logger.info("Looks like the input device status is not in the requested state. Will control garage door.")
+            control_device = garage_info['controlDevice']
+            control_device.command(garage_info['controlPulseStart'])
+            control_device.command(garage_info['controlPulseEnd'], delay=garage_info['controlPulseTime']*.001)
+            device.device_command_pending(request_id, message="Moving garage ")
+        else:
+            logger.info("Garage already in requested state. We will update our status and fake it.")
+            device.device_command_done(request_id, message="Garage door already in requested position.")
+            self._set_status(device, command)
+
+    @inlineCallbacks
+    def _device_status_(self, **kwargs):
+        input_device = kwargs['device']
+        status_type = None
+        if input_device.device_id in self.garageClosedDevices:
+            logger.info("Received status for a garage closed input device...")
+            status_type = 'closed'
+            garage_data = self.garageDevices[self.garageClosedDevices[input_device.device_id]]
+            if garage_data['openDevice'] is None:
+                if input_device.status_history[0]['human_status'] == garage_data['closedStateClosed']:
+                    logger.info("garage door is now closed...  lets update some status and check if pending")
+                    if garage_data['device'].device_id in self.control_requests_pending:
+                        logger.info("We have a pending request... we will clear it out")
+                if input_device.status_history[0]['human_status'] == garage_data['closedStateOpened']:
+                    logger.info("garage door is now closed...  lets update some status and check if pending")
+                    if garage_data['device'].device_id in self.control_requests_pending:
+                        logger.info("We have a pending request... we will clear it out")
+
 
     def message(self, message):
         """

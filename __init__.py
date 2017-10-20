@@ -1,1 +1,1 @@
-from garagedoor import GarageDoor
+from .garagedoor import GarageDoor

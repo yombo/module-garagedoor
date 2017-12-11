@@ -4,10 +4,10 @@ Summary
 This Yombo module makes 'dumb' garages into smart ones by adding logic to control
 a garage door (or devices that act like garage doors).
 
-Additional details about this module at: https://docs.yombo.net/Modules/garagedoor
+Additional details about this module at: https://yombo.net/modules/garagedoor
 
 Learn about [Yombo Gateway](https://yombo.net/) or
-[Get started today](https://docs.yombo.net/Gateway/Quick_start)
+[Get started today](https://yg2.in/start)
 
 Usage
 =====
@@ -19,7 +19,8 @@ Garage Door
 ================
 
 > **Warning**
-> Caution should be used when operating garage doors remotely. Video cameras or other sensors should be used to validate the safety of operation.
+> Caution should be used when operating garage doors remotely. Video cameras or
+> other sensors should be used to validate the safety of operation.
 
 To act like a garage door, 2 devices are required:
 

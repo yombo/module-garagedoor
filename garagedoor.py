@@ -34,14 +34,18 @@ it will send a close and then an open.
 This module is considered complex because it has to track if a command to is
 is already pending, as well as checking various input devices for decision logic.
 
+Learn about at: https://yombo.net/
+Get started today: https://yg2.in/start
+
 .. moduleauthor:: Mitch Schwenk <mitch-gw@yombo.net>
+
 :copyright: 2012-2017 Yombo
 :license: YRPL 1.6
 """
 import traceback
 
 from twisted.internet import reactor
-from twisted.internet.defer import inlineCallbacks, returnValue
+from twisted.internet.defer import inlineCallbacks
 
 from yombo.core.log import get_logger
 from yombo.core.module import YomboModule

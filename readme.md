@@ -1,6 +1,9 @@
 Summary
 =======
 
+The primary repository link: https://github.com/yombo/module-garagedoor
+
+
 This Yombo module makes 'dumb' garages into smart ones by adding logic to control
 a garage door (or devices that act like garage doors).
 
@@ -49,8 +52,10 @@ See "Garage Door" above for requirements.
 License
 =======
 
+See LICENSE file for full details.
+
 The [Yombo](https://yombo.net/) team and other contributors hopes that it will be
 useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 
-See LICENSE file for full details.
+

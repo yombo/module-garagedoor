@@ -97,14 +97,15 @@ class GarageDoor(YomboModule):
     def _load_(self, **kwargs):
         yield self._reload_()
 
+    @inlineCallbacks
     def _reload_(self, **kwargs):
         """
         First, get a list of all devices we manage. validate that the commands
         we were given are valid for that device.
         """
-        my_devices = self._ModuleDevices()
+        my_devices = yield self._module_devices()
         for device_id, device in my_devices.items():
-            device_variables = device.device_variables
+            device_variables = yield device.device_variables()
 
             try:
                 controlDevice_id = device_variables['controldevice']['values'][0]
